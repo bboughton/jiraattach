@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -39,29 +40,38 @@ CONFIG
 )
 
 func main() {
-	configpath := flag.String("config", filepath.Join(os.Getenv("HOME"), ".config", "jiraattach", "config.json"), "path to config file")
-	flag.Usage = func() {
+	err := run(os.Args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		os.Exit(1)
+	}
+}
+
+func run(args []string) error {
+	fs := flag.NewFlagSet("", flag.ExitOnError)
+	configpath := fs.String("config", filepath.Join(os.Getenv("HOME"), ".config", "jiraattach", "config.json"), "path to config file")
+	fs.Usage = func() {
 		fmt.Fprintln(os.Stderr, usageMsg)
 	}
-	flag.Parse()
+	err := fs.Parse(args[1:])
+	if err != nil {
+		return err
+	}
 
-	args := flag.Args()
+	args = fs.Args()
 	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "key and path are required")
-		os.Exit(2)
+		return errors.New("key and path are required")
 	}
 	key, filepath := args[0], args[1]
 
 	configfile, err := os.Open(*configpath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "unable to open config file, %v", *configpath)
-		os.Exit(2)
+		return fmt.Errorf("unable to open config file, %v", *configpath)
 	}
 	defer configfile.Close()
 	config := &Config{}
 	if err := json.NewDecoder(configfile).Decode(config); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to read config file, %v: %v\n", *configpath, err)
-		os.Exit(2)
+		return fmt.Errorf("failed to read config file, %v: %v\n", *configpath, err)
 	}
 
 	httpclient := &http.Client{
@@ -70,8 +80,7 @@ func main() {
 
 	file, err := os.Open(filepath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading attachment, %v: %v\n", filepath, err)
-		os.Exit(2)
+		return fmt.Errorf("error reading attachment, %v: %v\n", filepath, err)
 	}
 	defer file.Close()
 
@@ -79,24 +88,20 @@ func main() {
 	w := multipart.NewWriter(body)
 	part, err := w.CreateFormFile("file", filepath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error attaching file to form: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("error attaching file to form: %v\n", err)
 	}
 	_, err = io.Copy(part, file)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error copying attachment into request: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("error copying attachment into request: %v\n", err)
 	}
 	err = w.Close()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error writing form body: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("error writing form body: %v\n", err)
 	}
 
 	req, err := http.NewRequest("POST", config.JiraURL+"/rest/api/2/issue/"+key+"/attachments", body)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error creating request: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("error creating request: %v\n", err)
 	}
 	req.Header.Set("Content-Type", w.FormDataContentType())
 	req.Header.Set("X-Atlassian-Token", "nocheck") // Disable XSRF verification
@@ -109,8 +114,7 @@ func main() {
 
 	resp, err := httpclient.Do(req)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error sending request: %v\n", err)
-		os.Exit(2)
+		return fmt.Errorf("error sending request: %v\n", err)
 	}
 	defer resp.Body.Close()
 
@@ -121,11 +125,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "request failed with status code, %d\n", resp.StatusCode)
 		respbody, err := ioutil.ReadAll(resp.Body)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error reading error-response body: %v\n", err)
+			return fmt.Errorf("error reading error-response body: %v\n%v", err, string(respbody))
 		}
-		fmt.Fprintln(os.Stderr, string(respbody))
-		os.Exit(2)
 	}
+	return nil
 }
 
 type Config struct {
